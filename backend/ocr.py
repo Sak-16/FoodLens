@@ -54,8 +54,16 @@ elif os.path.exists(_windows_default):
 # PREPROCESSING
 # ============================================================
 
-def preprocess_variants(image_path):
-    """Label photos come with shadows, gloss, curves and low contrast."""
+def decode_and_resize(image_path):
+    """
+    Reads the photo off disk and resizes it to the fixed working width,
+    once. Both the main text pass and the nutrition-table pass used to
+    each do this independently — two full JPEG decodes of the same file,
+    each holding its own full-resolution buffer in memory at once. On a
+    512MB free-tier instance that doubling was enough to get the whole
+    process SIGKILLed for using too much RAM. Decoding once here and
+    handing the same grayscale array to both passes halves that peak.
+    """
 
     image = cv2.imread(image_path)
 
@@ -77,6 +85,18 @@ def preprocess_variants(image_path):
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # `image` (the full color buffer) isn't needed past this point — only
+    # `gray` is used by either pass. Dropping the reference lets Python
+    # free it before the OCR passes below allocate their own working
+    # buffers, instead of holding both in memory at the same time.
+    del image
+
+    return gray
+
+
+def build_variants(gray):
+    """Label photos come with shadows, gloss, curves and low contrast."""
 
     # Even out uneven lighting before anything else.
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -299,27 +319,19 @@ def _gentle_clean(text):
     return "\n".join(lines)
 
 
-def extract_nutrition_block(image_path):
+def extract_nutrition_block(gray):
     """
     Locates the nutrition table, crops tightly to it, and re-OCRs just
     that region with settings suited to small gridded text. Returns the
     reconstructed table text, or "" if no table could be found — callers
     should treat that as "nothing extra to add", not an error.
+
+    Takes the same grayscale array the main pass already decoded and
+    resized — this used to re-read and re-decode the image file itself,
+    which doubled peak memory for no benefit since both passes end up
+    wanting the same resized grayscale image anyway.
     """
 
-    image = cv2.imread(image_path)
-    if image is None:
-        return ""
-
-    height, width = image.shape[:2]
-    if width < 1800:
-        scale = 1800 / width
-        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    elif width > 1800:
-        scale = 1800 / width
-        image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     img_h, img_w = gray.shape[:2]
 
     anchor = _locate_nutrition_anchor(gray)
@@ -404,7 +416,8 @@ def extract_nutrition_block(image_path):
 def extract_text(image_path):
     """Runs several preprocessing variants and keeps the most confident read."""
 
-    variants = preprocess_variants(image_path)
+    gray = decode_and_resize(image_path)
+    variants = build_variants(gray)
 
     # psm 6 = one uniform block. psm 4 (columns) used to be tried too, but
     # doubling every variant's Tesseract pass was expensive on a slow CPU
@@ -431,9 +444,10 @@ def extract_text(image_path):
     # Dedicated second pass so the nutrition table isn't left to compete
     # with the (usually much longer) prose for the single whole-image
     # variant choice above. Best-effort: if it can't find or read a table,
-    # the whole-image text above is returned exactly as before.
+    # the whole-image text above is returned exactly as before. Reuses the
+    # same `gray` array decoded above instead of re-reading the file.
     try:
-        table_text = extract_nutrition_block(image_path)
+        table_text = extract_nutrition_block(gray)
     except Exception:
         table_text = ""
 
