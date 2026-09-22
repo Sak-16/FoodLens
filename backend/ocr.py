@@ -67,8 +67,13 @@ def preprocess_variants(image_path):
     if width < 1800:
         scale = 1800 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    elif width > 3200:
-        scale = 3200 / width
+    elif width > 2200:
+        # Free-tier hosting (Render's 0.1 CPU free plan) is slow enough that
+        # Tesseract's runtime on a 3200px-wide image routinely blows past the
+        # gunicorn request timeout. 2200px is still comfortably readable for
+        # prose text and cuts pixel count (and OCR time) substantially versus
+        # the previous cap.
+        scale = 2200 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -77,21 +82,20 @@ def preprocess_variants(image_path):
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     balanced = clahe.apply(gray)
 
-    denoised = cv2.bilateralFilter(balanced, 7, 55, 55)
-
-    _, otsu = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
     adaptive = cv2.adaptiveThreshold(
-        denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
+        balanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
     )
 
     sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     sharpened = cv2.filter2D(balanced, -1, sharpen_kernel)
 
+    # Trimmed from 5 variants to the 3 that cover the most ground (even
+    # lighting, thresholded, and sharpened). Each extra variant means two
+    # more full Tesseract passes below — on a free-tier CPU that adds up to
+    # real seconds, so this cut is worth more than the OCR-accuracy edge
+    # the dropped variants ("denoised", "otsu") occasionally gave.
     return [
         ("balanced", balanced),
-        ("denoised", denoised),
-        ("otsu", otsu),
         ("adaptive", adaptive),
         ("sharpened", sharpened),
     ]
@@ -363,18 +367,18 @@ def extract_nutrition_block(image_path):
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     balanced = clahe.apply(crop)
 
-    _, otsu = cv2.threshold(balanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
     sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
     sharpened = cv2.filter2D(balanced, -1, sharpen_kernel)
 
-    variants = [("balanced", balanced), ("otsu", otsu), ("sharpened", sharpened)]
-    # psm 6 (one uniform block) keeps a table row's label and its columns
-    # of numbers together on one line; psm 4 tries to detect column
-    # boundaries itself and, on a tight numeric grid, routinely loses the
-    # row structure entirely. It's kept as a fallback candidate only in
-    # case psm 6 fails outright on a given photo.
-    configs = ["--oem 3 --psm 6", "--oem 3 --psm 4"]
+    # Trimmed from 3 variants x 2 configs (6 combinations) to 2 x 1. psm 6
+    # (one uniform block) reliably outperformed psm 4 on tight numeric
+    # grids in practice, and "otsu" was the variant most likely to be
+    # redundant with "balanced" — dropping both keeps the two combinations
+    # that matter most while cutting this pass's Tesseract calls by two
+    # thirds, which matters a lot more on a slow free-tier CPU than the
+    # occasional row the dropped combinations used to recover.
+    variants = [("balanced", balanced), ("sharpened", sharpened)]
+    configs = ["--oem 3 --psm 6"]
 
     candidates = []  # (keyword_score, confidence, text)
 
@@ -413,8 +417,11 @@ def extract_text(image_path):
 
     variants = preprocess_variants(image_path)
 
-    # psm 6 = one uniform block, psm 4 = columns of variable-width text.
-    configs = ["--oem 3 --psm 6", "--oem 3 --psm 4"]
+    # psm 6 = one uniform block. psm 4 (columns) used to be tried too, but
+    # doubling every variant's Tesseract pass was expensive on a slow CPU
+    # for a fairly small accuracy gain on label prose, which is usually one
+    # block of text rather than true multi-column layout.
+    configs = ["--oem 3 --psm 6"]
 
     best_score = 0.0
     best_image = None
