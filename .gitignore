@@ -1,0 +1,20 @@
+# Secrets — never commit real credentials
+backend/.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local caches / runtime data
+backend/enrich_cache.db
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

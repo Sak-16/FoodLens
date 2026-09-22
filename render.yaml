@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: foodlens
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: MONGODB_URI
+        sync: false # set this in the Render dashboard — your Atlas connection string
+      - key: MONGODB_DB_NAME
+        value: foodlens
+      - key: ANTHROPIC_API_KEY
+        sync: false # optional — leave unset to run in offline mode
+      - key: FOODLENS_AI
+        value: on
