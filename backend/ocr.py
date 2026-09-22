@@ -67,13 +67,13 @@ def preprocess_variants(image_path):
     if width < 1800:
         scale = 1800 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    elif width > 2200:
-        # Free-tier hosting (Render's 0.1 CPU free plan) is slow enough that
-        # Tesseract's runtime on a 3200px-wide image routinely blows past the
-        # gunicorn request timeout. 2200px is still comfortably readable for
-        # prose text and cuts pixel count (and OCR time) substantially versus
-        # the previous cap.
-        scale = 2200 / width
+    elif width > 1800:
+        # Locked to a fixed 1800px instead of a 1800-2200 range. Render's
+        # free-tier CPU (a slice of a single core) turned out to still be
+        # too slow even at 2200px with a trimmed pipeline — 1800px is the
+        # floor prose OCR needs to stay readable, so this is close to the
+        # smallest we can go without hurting accuracy.
+        scale = 1800 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -86,18 +86,13 @@ def preprocess_variants(image_path):
         balanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 11
     )
 
-    sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(balanced, -1, sharpen_kernel)
-
-    # Trimmed from 5 variants to the 3 that cover the most ground (even
-    # lighting, thresholded, and sharpened). Each extra variant means two
-    # more full Tesseract passes below — on a free-tier CPU that adds up to
-    # real seconds, so this cut is worth more than the OCR-accuracy edge
-    # the dropped variants ("denoised", "otsu") occasionally gave.
+    # Trimmed further to just 2 variants. "sharpened" is dropped here too —
+    # on a very slow CPU every variant is now a meaningful chunk of the
+    # request's total time, and balanced + adaptive cover the most ground
+    # (even lighting, and a cleanly thresholded fallback).
     return [
         ("balanced", balanced),
         ("adaptive", adaptive),
-        ("sharpened", sharpened),
     ]
 
 
@@ -320,8 +315,8 @@ def extract_nutrition_block(image_path):
     if width < 1800:
         scale = 1800 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    elif width > 3200:
-        scale = 3200 / width
+    elif width > 1800:
+        scale = 1800 / width
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -367,17 +362,11 @@ def extract_nutrition_block(image_path):
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
     balanced = clahe.apply(crop)
 
-    sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(balanced, -1, sharpen_kernel)
-
-    # Trimmed from 3 variants x 2 configs (6 combinations) to 2 x 1. psm 6
-    # (one uniform block) reliably outperformed psm 4 on tight numeric
-    # grids in practice, and "otsu" was the variant most likely to be
-    # redundant with "balanced" — dropping both keeps the two combinations
-    # that matter most while cutting this pass's Tesseract calls by two
-    # thirds, which matters a lot more on a slow free-tier CPU than the
-    # occasional row the dropped combinations used to recover.
-    variants = [("balanced", balanced), ("sharpened", sharpened)]
+    # Trimmed again to a single variant/config. "sharpened" is dropped —
+    # "balanced" (CLAHE) alone, upscaled 1.8x below, has been carrying most
+    # of the useful reads; on Render's free CPU, halving this pass's calls
+    # again matters more than the marginal rows the second variant caught.
+    variants = [("balanced", balanced)]
     configs = ["--oem 3 --psm 6"]
 
     candidates = []  # (keyword_score, confidence, text)
