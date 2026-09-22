@@ -1,0 +1,9 @@
+Flask
+Flask-CORS
+pytesseract
+Pillow
+opencv-python
+numpy
+Werkzeug
+pymongo
+python-dotenv
